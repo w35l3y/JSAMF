@@ -34,31 +34,29 @@ var swfBridgeLocation = "js/bridge.swf",
 swfBridgeRemotingProxyList = [],
 _window = this;
 
-function decodeAMF(data)
+function decodeAMF (data)
 {
-  var bytes = new amf.ByteArray(data, amf.Endian.BIG);
-
+  var bytes = new amf.ByteArray(data, amf.Endian.BIG, amf.ObjectEncoding.AMF0),
+  version = bytes.readUnsignedShort();
+  //bytes.objectEncoding = version; // what is the point of keeping AMF0 ?
   //console.log(dumpHex(bytes));
-  var version = bytes.readUnsignedShort();
-  bytes.objectEncoding = amf.ObjectEncoding.AMF0;
 
-  var response = new amf.AMFPacket();
+  var response = new amf.AMFPacket(version);
   // Headers
   var headerCount = bytes.readUnsignedShort();
-  for (var h = 0; h < headerCount; h++)
-  {
-    var headerName = bytes.readUTF();
-    var mustUnderstand = bytes.readBoolean();
+  for (var h = 0; h < headerCount; h++) {
+    var headerName = bytes.readUTF(),
+    mustUnderstand = bytes.readBoolean();
     bytes.readInt(); // Consume header length...
 
     // Handle AVM+ type marker
-    if (version == amf.ObjectEncoding.AMF3)
-    {
+    if (version == amf.ObjectEncoding.AMF3) {
       var typeMarker = bytes.readByte();
-      if (typeMarker == amf.Amf0Types.kAvmPlusObjectType)
+      if (typeMarker == amf.Amf0Types.kAvmPlusObjectType) {
         bytes.objectEncoding = amf.ObjectEncoding.AMF3;
-      else
-        bytes.pos = bytes.pos - 1;
+      } else {
+        --bytes.pos;
+      }
     }
 
     var headerValue = bytes.readObject();
@@ -71,20 +69,20 @@ function decodeAMF(data)
   }
   // Message Bodies
   var messageCount = bytes.readUnsignedShort();
-  for (var m = 0; m < messageCount; m++)
-  {
-    var targetURI = bytes.readUTF();
-    var responseURI = bytes.readUTF();
+  for (var m = 0; m < messageCount; m++) {
+    var targetURI = bytes.readUTF(),
+    responseURI = bytes.readUTF();
     bytes.readInt(); // Consume message body length...
 
     // Handle AVM+ type marker
     if (version == amf.ObjectEncoding.AMF3)
     {
       var typeMarker = bytes.readByte();
-      if (typeMarker == amf.Amf0Types.kAvmPlusObjectType)
+      if (typeMarker == amf.Amf0Types.kAvmPlusObjectType) {
         bytes.objectEncoding = amf.ObjectEncoding.AMF3;
-      else
-        bytes.pos = bytes.pos - 1;
+      } else {
+        --bytes.pos;
+      }
     }
     var messageBody = bytes.readObject();
 
@@ -97,10 +95,55 @@ function decodeAMF(data)
   return response;
 }
 
+function encodeAMF(obj) {
+    if (!obj.headers) {
+      obj.headers = [];
+    }
+    if (!obj.messages) {
+        obj.messages = [];
+    }
+
+    // begin to write the request for data
+    var e = amf.Endian.BIG,
+    v = (obj.version?obj.version:amf.ObjectEncoding.AMF0),
+    bytes = new amf.ByteArray([], e, v);
+
+    bytes.writeInt(bytes.objectEncoding, 16);// protocol version 0 or 3.
+
+    bytes.writeInt(obj.headers.length, 16);// headers count
+    for each (var h in obj.headers) {
+      // @TODO test headers
+      bytes.writeUTF(h.name); //header name
+      bytes.writeInt(0, 8);// must understand
+
+      var header = new amf.ByteArray([], e, v);
+      //header.writeInt(1, 8); // type of header (????)
+      //header.writeInt(amf.Amf0Types.kAvmPlusObjectType, 8);// AMF3 (headers too?)
+      header.writeObject(h.data);
+
+      bytes.writeInt(header.data.length, 32);//  header data length (-1 for unknown)
+      Array.prototype.push.apply(bytes.data, header.data);
+    }
+
+    bytes.writeInt(obj.messages.length, 16);// messages count
+    for each (var m in obj.messages) {
+      bytes.writeUTF(m.targetURL);//  target
+      bytes.writeUTF(m.responseURI);//  response
+
+      var body = new amf.ByteArray([], e, v);
+      //body.writeInt(amf.Amf0Types.kAvmPlusObjectType, 8);// AMF3
+      body.writeObject(m.body);
+
+      bytes.writeInt(body.data.length, 32);//  message data length (-1 for unknown)
+      Array.prototype.push.apply(bytes.data, body.data);
+    }
+
+	return String.fromCharCode.apply(null, bytes.data);
+}
+
 function ErrorClass() {
   
 }
-
 
 // remoting proxy type
 function RemotingProxy(url, service, encoding)
@@ -213,32 +256,18 @@ RemotingProxy.prototype.addHandler = function(
 {
   // create handle function
   this[handlestr] = function () {
-    var headers = [],
-    handle;
-
-    // begin to write the request for data
-    var bytes = new amf.ByteArray();
-    bytes.objectEncoding = this.encoding;
-    bytes.writeInt(this.encoding, 16);// protocol version 0 or 3.
-    bytes.writeInt(headers.length, 16);// headers count
-    bytes.writeInt(arguments.length, 16);// messages count
-    
-    for (var h in headers) {
-      // @TODO test headers
-      bytes.writeUTF(h.name); //header name
-      bytes.writeInt(0, 8);// must understand
-      bytes.writeInt(headers.length, 32);//  write header data length
-      bytes.writeInt(1, 8); // type of header (????)
-    }
-
-    // write the body
-    bytes.writeUTF(this.service + "." + handlestr);//  target
-    bytes.writeUTF("/" + (this.response_number++));//  response
-    bytes.writeInt(0x0E, 32);//  byte-length of message ( -1 for unknown)
+    // string to send
+    var str = encodeAMF({
+      version  : this.encoding,
+      headers  : [],
+      messages : [{
+        targetURL  : this.service + "." + handlestr,
+        responseURI: "/" + (this.response_number++),
+        body  : Array.prototype.slice.call(arguments)
+      }]
+    }),
+    handle,req;
     this.handles[this.response_number] = this[handlestr];
-
-    // write body args as an array.
-    bytes.writeObject(Array.prototype.slice.call(arguments));
 
     if (_window.XMLHttpRequest && "undefined" == typeof(_window.ActiveXObject)) {
       req = new XMLHttpRequest();
@@ -252,14 +281,12 @@ RemotingProxy.prototype.addHandler = function(
       };
     }
 
-    // string to send
-    var str = bytes.data;
     // the browser must support binary Http requests
     if ("undefined" != typeof(req) && req.sendAsBinary) { // firefox (w3 standard)
       req.sendAsBinary(str);
-    }else if (_window.ActiveXObject) {   // IE
+    } else if (_window.ActiveXObject) {   // IE
       // gateway not ready, buffer the requests
-      if(!this.flashgatewayloaded) {
+      if (!this.flashgatewayloaded) {
         this.flashgatewaybuffer.push([url, escape(str)]);
         return;
       }
@@ -555,7 +582,7 @@ function Integer()
  * @extends Class
  */
 amf.ByteArray = Class.extend({
-  data: [],
+  data: []
   , length: 0
   , pos: 0
   , pow: Math.pow
@@ -568,7 +595,7 @@ amf.ByteArray = Class.extend({
   , traitTable: []
 
   /** @constructor */
-  , init: function(data, endian)
+  , init: function(data, endian, encoding)
   {
     if (typeof data == "string") {
       data = data.split("").map(function(c) {
@@ -576,9 +603,10 @@ amf.ByteArray = Class.extend({
       });
     }
 
-    if (data !== undefined) this.data = data;
-    if (endian !== undefined) this.endian = endian;
-    this.length = data.length;
+    this.data = (data !== undefined?data:[]);
+    this.endian = (endian !== undefined?endian:amf.Endian.BIG);
+    this.objectEncoding = (encoding !== undefined?encoding:amf.ObjectEncoding.AMF0);
+    this.length = this.data.length;
     this.stringTable = [];
     this.objectTable = [];
     this.traitTable = [];
@@ -891,7 +919,8 @@ amf.ByteArray = Class.extend({
   }
   , readAMF0Object: function()
   {
-    switch (this.readByte()) {
+    var marker = this.readByte();
+    switch (marker) {
       case amf.Amf0Types.kUndefinedType:
         return undefined;
       case amf.Amf0Types.kNullType:
@@ -1008,9 +1037,7 @@ amf.ByteArray = Class.extend({
           this.objectTable.push(a); // this was lacking in prev versions
 
           for (var i = (ref >> 1);i;--i) {
-            var value = this.readAMF3Object();
-  //          var value = this.readObject();
-            a.push(value);
+            a.push(this.readObject());
           }
 
           return a;
@@ -1021,8 +1048,7 @@ amf.ByteArray = Class.extend({
         this.objectTable.push(result);
 
         while (key != "") {
-          result[key] = this.readAMF3Object();
-  //        result[key] = this.readObject();
+          result[key] = this.readObject();
           key = this.readStringAMF3();
         }
 
@@ -1057,8 +1083,7 @@ amf.ByteArray = Class.extend({
           var len = ti.properties.length;
 
           for (var i = 0; i < len; i++) {
-            o[ti.properties[i]] = this.readAMF3Object();
-            //o[ti.properties[i]] = this.readObject();
+            o[ti.properties[i]] = this.readObject();
           }
           if (ti.dynamic) {
             while (true) {
@@ -1066,8 +1091,7 @@ amf.ByteArray = Class.extend({
               if (null == name || 0 == name.length) {
                 break;
               }
-              o[name] = this.readAMF3Object();
-              //o[name] = this.readObject();
+              o[name] = this.readObject();
             }
           }
         }
@@ -1107,7 +1131,7 @@ amf.ByteArray = Class.extend({
         }
 
         var len = (ref >> 1),
-        ba = new amf.ByteArray();
+        ba = new amf.ByteArray([], this.endian, this.objectEncoding);
 
         this.objectTable.push(ba);
 
@@ -1137,12 +1161,12 @@ amf.ByteArray = Class.extend({
     }
 
     while (number) {
-      r.push(String.fromCharCode(number % 0x100));
+      r.push(number % 0x100);
       number = Math.floor(number / 0x100);
     }
     bits = -(-bits >> 3) - r.length;
     while (bits--) {
-      r.push("\0");
+      r.push(0);
     }
 
     Array.prototype.push.apply(this.data, this.endian == amf.Endian.BIG ? r.reverse() : r);
@@ -1151,7 +1175,9 @@ amf.ByteArray = Class.extend({
   {
     this.writeInt(str.length, 0x10); // unsigned short (max 65535)
 
-    Array.prototype.push.apply(this.data, str.split(""));
+    Array.prototype.push.apply(this.data, str.split("").map(function ($0) {
+		return $0.charCodeAt(0);
+	}));
   },// fr : http://snippets.dzone.com/posts/show/685
   writeDouble: function(data) {
     data = parseFloat(data);
@@ -1191,12 +1217,14 @@ amf.ByteArray = Class.extend({
     for( n = 0, j = 0, i = ( result = ( signal ? "1" : "0" ) + result + bin.slice( i, i + precisionBits ).join( "" ) ).length, r = []; i; j = ( j + 1 ) % 8 ){
       n += ( 1 << j ) * result.charAt( --i );
       if( j == 7 ){
-        r.push(String.fromCharCode(n));
+        r.push(n);
         n = 0;
       }
     }
-    r.push(n ? String.fromCharCode( n ) : "");
-    
+	if (n) {
+		r.push(n);
+	}
+
     Array.prototype.push.apply(this.data, this.endian == amf.Endian.BIG ? r.reverse() : r);
   },
   writeAMF0Array: function (array)
@@ -1230,7 +1258,7 @@ amf.ByteArray = Class.extend({
       this.writeInt(amf.Amf0Types.kNumberType, 8);
       this.writeDouble(d); // double
     } else if (d instanceof String || typeof(d) == 'string') {
-      this.writeAmf0String(d);
+      this.writeAMF0String(d);
     } else if (d instanceof Array) {
       this.writeAMF0Array(d);
     } else if (d instanceof Object) {
@@ -1248,7 +1276,7 @@ amf.ByteArray = Class.extend({
             this.writeObject(d[prop]);
           }
           this.writeUTF("");
-          this.writeByte(9);
+          this.writeByte(amf.Amf0Types.kObjectEndType);
         }
       }
       // writeAnonymousObject
@@ -1268,7 +1296,7 @@ amf.ByteArray = Class.extend({
           console.log("write object var " + prop  + " = " + d[prop]);
         }
         this.writeUTF("");
-        this.writeByte(9);
+        this.writeByte(amf.Amf0Types.kObjectEndType);
       }
     } else {
       console.log('can\'t write type ' + typeof(d));
@@ -1305,16 +1333,16 @@ amf.ByteArray = Class.extend({
       throw ("Integer out of range: " + ref);
     }
   },
-  writeAmf0String: function (d)
+  writeAMF0String: function (d)
   {
     this.writeInt(amf.Amf0Types.kStringType, 8);
     this.writeInt(d.length, 16);
     
-    for (var ai = 0;ai < d.length;++ai) {
-      this.writeByte(d.charCodeAt(ai))
-    }
+    Array.prototype.push.apply(this.data, d.split("").map(function ($0) {
+		return $0.charCodeAt(0);
+	}));
   },
-  writeAmf3String: function (d)
+  writeAMF3String: function (d)
   {
     if ("" == d) {
        //Write 0x01 to specify the empty ctring
