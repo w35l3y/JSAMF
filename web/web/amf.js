@@ -151,13 +151,13 @@ function RemotingProxy(url, service, encoding)
   this.url = url;
   this.service = service;
   this.encoding = encoding;
-  this.handles = new Array();
+  this.handles = [];
   this.response_number = 0;
 
   // vars used if you're using the swf gateway
   this.flashgateway;
   this.flashgatewayloaded;
-  this.flashgatewaybuffer = new Array();
+  this.flashgatewaybuffer = [];
 
   // either AMF 0 or 3.
   if (encoding != amf.ObjectEncoding.AMF0 &&
@@ -273,12 +273,12 @@ RemotingProxy.prototype.addHandler = function(
       req = new XMLHttpRequest();
       //XHR binary charset opt by Marcus Granado 2006 [http://mgran.blogspot.com]
       req.overrideMimeType("text/plain; charset=x-user-defined");
-      req.open("POST", url, true);
+      req.open("POST", this.url, true);
       req.setRequestHeader("Content-Type", "application/x-amf");
       handle = new RemotingProxy.RequestHandle(req, resultFunction,statusFunction, this.response_number);
       req.onreadystatechange = function () {
         RemotingProxy.prototype._callBackFunction.call(this, handle);
-      };
+      }.bind(this);
     }
 
     // the browser must support binary Http requests
@@ -287,11 +287,11 @@ RemotingProxy.prototype.addHandler = function(
     } else if (_window.ActiveXObject) {   // IE
       // gateway not ready, buffer the requests
       if (!this.flashgatewayloaded) {
-        this.flashgatewaybuffer.push([url, escape(str)]);
+        this.flashgatewaybuffer.push([this.url, escape(str)]);
         return;
       }
       try {
-        this.flashgateway.sendData(url, escape(str));
+        this.flashgateway.sendData(this.url, escape(str));
       } catch (e) {
         // @TODO have a cry here
         alert('failed to send binary data ' + e.description);
