@@ -138,7 +138,7 @@ function encodeAMF(obj) {
       Array.prototype.push.apply(bytes.data, body.data);
     }
 
-	return String.fromCharCode.apply(null, bytes.data);
+    return String.fromCharCode.apply(null, bytes.data);
 }
 
 function ErrorClass() {
@@ -205,10 +205,12 @@ RemotingProxy.RequestHandle = function (req, resultFunction, statusFunction, n)
 RemotingProxy.prototype._callBackFunction = function (handle) {
   if (handle.req.readyState == 4) {
     if (handle.req.status == 200) {
-      var o = decodeAMF(handle.req.responseText);
-      // ErrorClass
-      console.log(o.messages);
-      handle.resultFunction(o.messages.length?o.messages[0].body:undefined, this);
+        var resp = handle.req.responseText;
+        console.log(encodeURIComponent(resp));
+        var o = decodeAMF(resp);
+        // ErrorClass
+        console.log(o.messages);
+        handle.resultFunction(o.messages.length?o.messages[0].body:undefined, this);
     } else {
       handle.statusFunction('ERROR: AJAX request status = ' + handle.req.status, this);
     }
@@ -218,8 +220,7 @@ RemotingProxy.prototype._callBackFunction = function (handle) {
 // 
 function FlashCallbackSuccess( str ) {
   try {
-    var mstr = unescape(str);
-    var o = decodeAMF(mstr);
+    var o = decodeAMF(unescape(str));
   } catch (e) {
       txt = "There was an error on this page.\n\n"
         + "Error description: " + e.description + "\n\n"
@@ -384,7 +385,7 @@ function writeChunk(chunk, width)
 if ('undefined' == typeof(amf))
 {
   amf = {
-    registeredClasses: [],
+    registeredClasses: {},
     RegisteredClass: function (name, funt) {
       this.name = name;
       this.initFunct = funt;
@@ -401,7 +402,12 @@ if ('undefined' == typeof(amf))
 // dynamic objects get made here
 function registerClassAlias(VOname, classVO)
 {
-  amf.registeredClasses.push(new amf.RegisteredClass(VOname, classVO));
+    if (VOname in amf.registeredClasses) {
+        return amf.registeredClasses[VOname];
+    }
+
+    console.log("Registering " + VOname + "...");
+    return amf.registeredClasses[VOname] = new amf.RegisteredClass(VOname, classVO);
 }
 
 // src http://ejohn.org/blog/simple-javascript-inheritance/
@@ -593,14 +599,31 @@ amf.ByteArray = Class.extend({
   , stringTable: []
   , objectTable: []
   , traitTable: []
+  , string2arrayOfBytes: function (str) {
+    return Array.prototype.concat.apply([], str.split("").map(function(c) {
+        var n = c.charCodeAt(0);
+
+        if (n <= 0x7F) {
+            return n;
+        } else if (n <= 0x7FF) {
+            return [0xC0 | ((n>>6) & 0x1F), 0x80 | (n & 0x3F)];
+        } else if (n <= 0xFFFF) {
+            return [0xE0 | ((n>>12) & 0x0F), 0x80 | ((n>>6) & 0x3F), 0x80 | (n & 0x3F)];
+        } else if (n <= 0x10FFFF) {
+            return [0xF0 | ((n>>18) & 0x07), 0x80 | ((n>>12) & 0x3F), 0x80 | ((n>>6) & 0x3F), 0x80 | (n & 0x3F)];
+        } else {
+            throw "Error converting char to byte " + n;
+        }
+    }));
+  }
 
   /** @constructor */
   , init: function(data, endian, encoding)
   {
     if (typeof data == "string") {
-      data = data.split("").map(function(c) {
-        return c.charCodeAt(0);
-      });
+      data = this.string2arrayOfBytes(data);
+
+      console.log(data.toSource());
     }
 
     this.data = (data !== undefined?data:[]);
@@ -637,7 +660,104 @@ amf.ByteArray = Class.extend({
   }
   , readByte: function()
   {
-    return (this.readByteRaw() & 0xFF);
+    //return (this.readByteRaw());
+    // http://stackoverflow.com/a/2953960/157873
+
+    var uc = 0,
+    pos = this.pos,
+    c1 = (this.readByteRaw() & 0xFF),
+    c2 = (this.data[1 + pos] & 0xFF),
+    seqlen = 0;
+
+    function IS_IN_RANGE (c, f, l) {
+        return (f <= c && c <= l);
+    }
+
+    // http://www.joelonsoftware.com/pictures/unicode/utf8.png
+    /*
+        00000000 0000007F 0vvvvvvv[0x7F]    [0x3F]
+        00000080 000007FF 110vvvvv[0x1F] 10vvvvvv
+        00000800 0000FFFF 1110vvvv[0x0F] 10vvvvvv 10vvvvvv
+        00010000 001FFFFF 11110vvv[0x07] 10vvvvvv 10vvvvvv 10vvvvvv
+
+        00200000 03FFFFFF 111110vv[0x03] 10vvvvvv 10vvvvvv 10vvvvvv 10vvvvvv
+        04000000 7FFFFFFF 1111110v[0x01] 10vvvvvv 10vvvvvv 10vvvvvv 10vvvvvv 10vvvvvv
+            A         B          C                 D          E           F        G         H
+
+        0x2019        -> 00100000 00011001
+                           0010   000000   011001
+        %EF%9F%A2    -> 11101111 10011111 10100010
+                    ->     1111   011111   100010
+        0xF7E2        ->     1111   011111   100010
+            
+        %EF%9E%80
+        11101111 10011110 10000000    1111 011110 000000
+        %EF%9E%99
+        11101111 10011110 10011001    1111 011110 011001
+
+        0x2026
+        00100000 00100110
+        %EF%9F%A2 %EF%9E%80 %EF%9E%A6
+
+    */
+    if (0 == (c1 & 0x80)) {
+        uc = (c1 & 0x7F);    // C
+        seqlen = 1;
+    } else if (0xC0 == (c1 & 0xE0)) {
+        uc = (c1 & 0x1F);    // C
+        seqlen = 2;
+    } else if (0xE0 == (c1 & 0xF0)) {
+        uc = (c1 & 0x0F);    // C
+        seqlen = 3;
+    } else if (0xF0 == (c1 & 0xF8)) {
+        uc = (c1 & 0x07);    // C
+        seqlen = 4;
+/*
+    } else if (0xF8 == (c1 & 0xFC)) {
+        uc = (c1 & 0x03);    // C
+        seqlen = 5;
+    } else if (0xFC == (c1 & 0xFE)) {
+        uc = (c1 & 0x01);    // C
+        seqlen = 6;
+*/
+    } else {
+//        console.log(this.data[this.pos-2]);
+        throw "Malformed data 0 0x" + (c1).toString(16) + " (" + this.pos + ")";
+    }
+    
+    for (var ai = 1; ai < seqlen; ++ai) {
+        if (0x80 != (this.data[ai + pos] & 0xC0)) {    // 10vvvvvv [0x40]
+            throw "Malformed data 1 " + ai + "/" + seqlen + " 0x" + (this.data[ai + pos]).toString(16) + " [c1 = 0x" + (c1).toString(16) +"] " + pos;
+        }
+    }
+    
+    switch (seqlen) {
+        case 2:
+            if (!IS_IN_RANGE(c1, 0xC2, 0xDF)) {
+                throw "Malformed data 2";
+            }
+            break;
+        case 3:
+            if (((c1 == 0xE0) && !IS_IN_RANGE(c2, 0xA0, 0xBF)) ||
+                ((c1 == 0xED) && !IS_IN_RANGE(c2, 0x80, 0x9F)) ||
+                (!IS_IN_RANGE(c1, 0xE1, 0xEC) && !IS_IN_RANGE(c1, 0xEE, 0xEF))) {
+                throw "Malformed data 3";
+            }
+            break;
+        case 4:
+            if (((c1 == 0xF0) && !IS_IN_RANGE(c2, 0x90, 0xBF)) ||
+                ((c1 == 0xF4) && !IS_IN_RANGE(c2, 0x80, 0x8F)) ||
+                !IS_IN_RANGE(c1, 0xF1, 0xF3)) {
+                throw "Malformed data 4";
+            }
+            break;
+    }
+
+    for (var ai = 1; ai < seqlen; ++ai) {
+        uc = ((uc << 0x06) | (this.readByteRaw() & 0x3F));
+    }
+
+    return uc;
   }
   , writeByte: function(value)
   {
@@ -645,27 +765,35 @@ amf.ByteArray = Class.extend({
   }
   , readBool: function()
   {
-    return (this.readByte()) ? true : false;
+    return (this.readByte() & 0xFF) ? true : false;
   }
   , readUInt30BE: function()
   {
-    var ch1 = this.readByte(),
-    ch2 = this.readByte(),
-    ch3 = this.readByte(),
-    ch4 = this.readByte();
+    var ch = [];
+    for (var ai = 4;ai;--ai) {
+        ch.push(this.readByte() & 0xFF);
+    }
 
-    if (ch1 >= 0x40) {
+    if (ch[0] >= 0x40) {
       return undefined;
     }
 
-    return ch4 | (ch3 << 0x08) | (ch2 << 0x10) | (ch1 << 0x18);
+    return (ch[0] << 0x18)
+        | (ch[1] << 0x10)
+        | (ch[2] << 0x08)
+        | ch[3];
   }
   , readUInt32BE: function()
   {
-    return (this.readByte() << 0x18)
-      | (this.readByte() << 0x10)
-      | (this.readByte() << 0x08)
-      | this.readByte();
+    var ch = [];
+    for (var ai = 4;ai;--ai) {
+        ch.push(this.readByte() & 0xFF);
+    }
+
+    return (ch[0] << 0x18)
+        | (ch[1] << 0x10)
+        | (ch[2] << 0x08)
+        | ch[3];
   }
   , readInt32BE: function()
   {
@@ -675,8 +803,8 @@ amf.ByteArray = Class.extend({
   }
   , readUInt16BE: function()
   {
-    return (this.readByte() << 0x08)
-      | this.readByte();
+    return ((this.readByte() & 0xFF) << 0x08)
+      | (this.readByte() & 0xFF);
   }
   , readInt16BE: function()
   {
@@ -686,13 +814,14 @@ amf.ByteArray = Class.extend({
   }
   , readFloat32BE: function()
   {
-    var b1 = this.readByte(),
-    b2 = this.readByte(),
-    b3 = this.readByte(),
-    b4 = this.readByte(),
-    sign = 1 - ((b1 >> 0x07) << 1),           // sign = bit 0
-    exp = (((b1 << 1) & 0xFF) | (b2 >> 0x07)) - 0x7F,  // exponent = bits 1..8
-    sig = ((b2 & 0x7F) << 0x10) | (b3 << 0x08) | b4;  // significand = bits 9..31
+    var b = [];
+    for (var ai = 4;ai;--ai) {
+        b.push(this.readByte() & 0xFF);
+    }
+
+    var sign = 1 - ((b[0] >> 0x07) << 1),           // sign = bit 0
+    exp = (((b[0] << 1) & 0xFF) | (b[1] >> 0x07)) - 0x7F,  // exponent = bits 1..8
+    sig = ((b[1] & 0x7F) << 0x10) | (b[2] << 0x08) | b[3];  // significand = bits 9..31
 
     if (sig == 0 && exp == -0x7F) {
       return 0.0;
@@ -703,12 +832,14 @@ amf.ByteArray = Class.extend({
   , readFloat64BE: function() {
     var b = [];
     for (var ai = 8;ai;--ai) {
-      b.push(this.readByte());
+      b.push(this.readByte() & 0xFF);
     }
+
     // This crazy toString() stuff works around the fact that js ints are
     // only 32 bits and signed, giving us 31 bits to work with
+//  var sig = ("0000000000000000000" + (((b[1] & 0x0F) << 0x10) | (b[2] << 0x08) | b[3]).toString(2)).slice(-20) +
     var sig = (((b[1] & 0x0F) << 0x10) | (b[2] << 0x08) | b[3]).toString(2) +
-    ((b[4] >> 7) ? "1" : "0") +
+    ((b[4] >> 0x07) ? "1" : "0") +
     ("000000000000000000000000000000" + (((b[4] & 0x7F) << 0x18) | (b[5] << 0x10) | (b[6] << 0x08) | b[7]).toString(2)).slice(-31),  // significand = bits 12..63
     sign = 1 - ((b[0] >> 0x07) << 1),                // sign = bit 0
     exp = (((b[0] << 0x04) & 0x7FF) | (b[1] >> 0x04)) - 0x3FF;    // exponent = bits 1..11
@@ -736,24 +867,29 @@ amf.ByteArray = Class.extend({
 
   , readUInt30LE: function()
   {
-    var ch1 = this.readByte(),
-    ch2 = this.readByte(),
-    ch3 = this.readByte(),
-    ch4 = this.readByte();
+    var ch = [];
+    for (var ai = 4;ai;--ai) {
+        ch.push(this.readByte() & 0xFF);
+    }
 
-    if (ch4 >= 0x40) {
+    if (ch[3] >= 0x40) {
       return undefined;
     }
 
-    return ch1 | (ch2 << 0x08) | (ch3 << 0x10) | (ch4 << 0x18);
+    return ch[0] | (ch[1] << 0x08) | (ch[2] << 0x10) | (ch[3] << 0x18);
   }
 
   , readUInt32LE: function()
   {
-    return this.readByte()
-      | (this.readByte() << 0x08)
-      | (this.readByte() << 0x10)
-      | (this.readByte() << 0x18);
+    var ch = [];
+    for (var ai = 4;ai;--ai) {
+        ch.push(this.readByte() & 0xFF);
+    }
+
+    return ch[0]
+      | (ch[1] << 0x08)
+      | (ch[2] << 0x10)
+      | (ch[3] << 0x18);
   }
   , readInt32LE: function()
   {
@@ -764,8 +900,8 @@ amf.ByteArray = Class.extend({
 
   , readUInt16LE: function()
   {
-    return this.readByte()
-      | (this.readByte() << 8);
+    return (this.readByte() & 0xFF)
+      | ((this.readByte() & 0xFF) << 0x08);
   }
   , readInt16LE: function()
   {
@@ -776,13 +912,14 @@ amf.ByteArray = Class.extend({
 
   , readFloat32LE: function()
   {
-    var b4 = this.readByte(),
-    b3 = this.readByte(),
-    b2 = this.readByte(),
-    b1 = this.readByte(),
-    sign = 1 - ((b1 >> 0x07) << 1),           // sign = bit 0
-    exp = (((b1 << 1) & 0xFF) | (b2 >> 0x07)) - 0x7F,  // exponent = bits 1..8
-    sig = b4 | (b3 << 0x08) | ((b2 & 0x7F) << 0x10);  // significand = bits 9..31
+    var b = [];
+    for (var ai = 4;ai;--ai) {
+        b.push(this.readByte() & 0xFF);
+    }
+
+    var sign = 1 - ((b[0] >> 0x07) << 1),           // sign = bit 0
+    exp = (((b[0] << 1) & 0xFF) | (b[1] >> 0x07)) - 0x7F,  // exponent = bits 1..8
+    sig = b[3] | (b[2] << 0x08) | ((b[1] & 0x7F) << 0x10);  // significand = bits 9..31
 
     if (sig == 0 && exp == -0x7F) {
       return 0.0;
@@ -790,20 +927,20 @@ amf.ByteArray = Class.extend({
 
     return sign * (1 + this.TWOeN23 * sig) * this.pow(2, exp);
   }
-  , readFloat64LE: function()
-  {
+  , readFloat64LE: function() {
     var b = [];
     for (var ai = 8;ai;--ai) {
-      b.push(this.readByte());
+      b.push(this.readByte() & 0xFF);
     }
 
     // This crazy toString() stuff works around the fact that js ints are
     // only 32 bits and signed, giving us 31 bits to work with
-    var sig = (((b[1] & 0xF) << 0x10) | (b[2] << 0x08) | b[3]).toString(2) +
+//  var sig = ("0000000000000000000" + (((b[1] & 0x0F) << 0x10) | (b[2] << 0x08) | b[3]).toString(2)).slice(-20) +
+    var sig = (((b[1] & 0x0F) << 0x10) | (b[2] << 0x08) | b[3]).toString(2) +
     ((b[4] >> 0x07) ? "1" : "0") +
     ("000000000000000000000000000000" + (((b[4] & 0x7F) << 0x18) | (b[5] << 0x10) | (b[6] << 0x08) | b[7]).toString(2)).slice(-31),  // significand = bits 12..63
     sign = 1 - ((b[0] >> 0x07) << 1),                // sign = bit 0
-    exp = (((b[0] << 4) & 0x7FF) | (b[1] >> 4)) - 0x3FF;    // exponent = bits 1..11
+    exp = (((b[0] << 0x04) & 0x7FF) | (b[1] >> 0x04)) - 0x3FF;    // exponent = bits 1..11
 
     sig = parseInt(sig, 2);
 
@@ -829,11 +966,11 @@ amf.ByteArray = Class.extend({
 
     return str;
   }
-  , readUTF: function()
+  , readUTF: function ()
   {
     return this.readString(this.readUnsignedShort());
   }
-  , readLongUTF: function()
+  , readLongUTF: function ()
   {
     return this.readString(this.readUInt30());
   }
@@ -856,12 +993,12 @@ amf.ByteArray = Class.extend({
     return xmlDoc;
   }
 
-  , readXML: function()
+  , readXML: function ()
   {
     return this.stringToXML(this.readLongUTF());
   }
 
-  , readStringAMF3: function()
+  , readStringAMF3: function ()
   {
     var ref = this.readUInt29();
     if ((ref & 1) == 0) {// This is a reference
@@ -944,27 +1081,19 @@ amf.ByteArray = Class.extend({
       case amf.Amf0Types.kObjectType:
       case amf.Amf0Types.kECMAArrayType:
         var o = {},
-        className = null,  // <-- where to find?
-        ismixed = (marker == amf.Amf0Types.kECMAArrayType),
-        size = null;
-        // @TODO: test this
-        for (var i = 0; i < amf.registeredClasses.length; i++) {
-          if(amf.registeredClasses[i].name == className) {
-            o = new amf.registeredClasses[i].initFunct();
-          }
-        }
+        ismixed = (marker == amf.Amf0Types.kECMAArrayType);
 
         if (ismixed) {
           this.readUInt30();
         }
 
         while (true) {
-          var name = this.readString((this.readByte() << 8) | this.readByte());
-          if (this.readByte() == amf.Amf0Types.kObjectEndType) {
+          var name = this.readUTF();
+
+          if (this.data[this.pos] == amf.Amf0Types.kObjectEndType) {
+            this.pos++;
             break;
           }
-
-          this.pos--;
 
           o[name] = this.readObject();
         }
@@ -979,19 +1108,22 @@ amf.ByteArray = Class.extend({
 
         return a;
       case amf.Amf0Types.kTypedObjectType:
-        var o = {};
+        var name = this.readUTF(),
+        ca = registerClassAlias(name, function () {}),
+        o = new ca.initFunct(),
+        propertyName = this.readUTF();
 
-        var typeName = this.readUTF();
-        var propertyName = this.readUTF();
-        while (this.readByte() != amf.Amf0Types.kObjectEndType) {
+        while (this.data[this.pos] != amf.Amf0Types.kObjectEndType) {
           o[propertyName] = this.readObject();
 
           propertyName = this.readUTF();
         }
+        this.pos++;
 
         return o;
     }
-    throw ("AMF0 Decoding failure. ID with type " + marker + " found.");
+
+    throw ("AMF0 Decoding failure. ID with type " + marker + " found. (" + this.pos + ")");
   }
   , readAMF3Object: function()
   {
@@ -1067,14 +1199,10 @@ amf.ByteArray = Class.extend({
         var o = {},
         ti = this.readTraits(ref),
         className = ti.className,
+        ca = registerClassAlias(className, function () {}),
+        o = new ca.initFunct(),
         externalizable = ti.externalizable;
 
-        for (var i = 0; i < amf.registeredClasses.length; i++) {
-          if(amf.registeredClasses[i].name == className) {
-            o = new amf.registeredClasses[i].initFunct();
-            // break; ?
-          }
-        }
         this.objectTable.push(o);
 
         if (externalizable) {
@@ -1176,8 +1304,8 @@ amf.ByteArray = Class.extend({
     this.writeInt(str.length, 0x10); // unsigned short (max 65535)
 
     Array.prototype.push.apply(this.data, str.split("").map(function ($0) {
-		return $0.charCodeAt(0);
-	}));
+        return $0.charCodeAt(0);
+    }));
   },// fr : http://snippets.dzone.com/posts/show/685
   writeDouble: function(data) {
     data = parseFloat(data);
@@ -1221,9 +1349,9 @@ amf.ByteArray = Class.extend({
         n = 0;
       }
     }
-	if (n) {
-		r.push(n);
-	}
+    if (n) {
+        r.push(n);
+    }
 
     Array.prototype.push.apply(this.data, this.endian == amf.Endian.BIG ? r.reverse() : r);
   },
@@ -1254,7 +1382,7 @@ amf.ByteArray = Class.extend({
     } else if (d instanceof Integer) {
       this.writeInt(amf.Amf0Types.kAvmPlusObjectType, 8);
       this.writeAMFInt(d.data);
-    }else if (typeof(d) == 'number' || d == Number.NaN) {
+    }else if (typeof(d) == "number" || d == Number.NaN) {
       this.writeInt(amf.Amf0Types.kNumberType, 8);
       this.writeDouble(d); // double
     } else if (d instanceof String || typeof(d) == 'string') {
@@ -1264,8 +1392,7 @@ amf.ByteArray = Class.extend({
     } else if (d instanceof Object) {
       // writeTypedObject
       var typedObject = false;
-      for(var i = 0; i < amf.registeredClasses.length; i++) {
-        var o = amf.registeredClasses[i];
+      for each (var o in amf.registeredClasses) {
         if (d instanceof o.initFunct) {
           typedObject = true;
           this.writeInt(amf.Amf0Types.kTypedObjectType, 8);
@@ -1279,13 +1406,14 @@ amf.ByteArray = Class.extend({
           this.writeByte(amf.Amf0Types.kObjectEndType);
         }
       }
+
       // writeAnonymousObject
       if (!typedObject) {
         console.log('class not registered, write');
         console.log(d);
         // if it's a function starting with _, we skip it
         if (typeof(d) == 'function') {
-          console.log(d.toString())
+          console.log(d.toString());
           var functionname = d.toString().match(/^function\s(\w+)/);
           console.log("functionname = " + functionname);
         }
@@ -1336,11 +1464,14 @@ amf.ByteArray = Class.extend({
   writeAMF0String: function (d)
   {
     this.writeInt(amf.Amf0Types.kStringType, 8);
-    this.writeInt(d.length, 16);
+    //var data = this.string2arrayOfBytes(d);
+    var data = Array.prototype.concat.apply([], d.split("").map(function(c) {
+        return c.charCodeAt(0);
+    }));
+
+    this.writeInt(data.length, 16);
     
-    Array.prototype.push.apply(this.data, d.split("").map(function ($0) {
-		return $0.charCodeAt(0);
-	}));
+    Array.prototype.push.apply(this.data, data);
   },
   writeAMF3String: function (d)
   {
@@ -1359,8 +1490,12 @@ amf.ByteArray = Class.extend({
           throw ("failed to find amf3 string");
         }
       } else {
-        this.writeInt29(1 + 2 * d.length);
-        this.data.push(d);
+        //var data = this.string2arrayOfBytes(d);
+        var data = Array.prototype.concat.apply([], d.split("").map(function(c) {
+            return c.charCodeAt(0);
+        }));
+        this.writeInt29(1 + 2 * data.length);
+        Array.prototype.push.apply(this.data, data);
   
         return this.stringTable.push(d);
       }
