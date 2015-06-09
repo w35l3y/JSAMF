@@ -111,7 +111,8 @@ function encodeAMF(obj) {
     bytes.writeInt(bytes.objectEncoding, 16);// protocol version 0 or 3.
 
     bytes.writeInt(obj.headers.length, 16);// headers count
-    for each (var h in obj.headers) {
+    for (var hk in obj.headers) {
+      var h = obj.headers[hk];
       // @TODO test headers
       bytes.writeUTF(h.name); //header name
       bytes.writeInt(0, 8);// must understand
@@ -488,13 +489,13 @@ function registerClassAlias(VOname, classVO)
  */
 amf.Endian = {
   BIG: 0,
-  LITTLE: 1,
+  LITTLE: 1
 };
 
 // AMF encoding type
 amf.ObjectEncoding = {
   AMF0: 0,
-  AMF3: 3,
+  AMF3: 3
 };
 
 // AMF data types 
@@ -516,7 +517,7 @@ amf.Amf0Types = {
   kRecordsetType:   14,
   kXMLObjectType:   15,
   kTypedObjectType:   16,
-  kAvmPlusObjectType: 17,
+  kAvmPlusObjectType: 17
 };
 
 // AMF3 datatypes
@@ -533,7 +534,7 @@ amf.Amf3Types = {
   kArrayType:    9,
   kObjectType:   10,
   kAvmPlusXmlType: 11,
-  kByteArrayType:  12,
+  kByteArrayType:  12
 };
 
 // each AMF message has a target
@@ -651,7 +652,7 @@ amf.ByteArray = Class.extend({
       readShort: 'readInt16' + funcExt,
       readInt: 'readInt32' + funcExt,
       readFloat: 'readFloat32' + funcExt,
-      readDouble: 'readFloat64' + funcExt,
+      readDouble: 'readFloat64' + funcExt
     };
     for (var func in funcMap)
     {
@@ -1537,5 +1538,5 @@ amf.ByteArray = Class.extend({
         + (i >> 8 & 0x7f | 0x80)
         + (i & 0xff));
     }
-  },
+  }
 });
