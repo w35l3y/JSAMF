@@ -127,7 +127,8 @@ function encodeAMF(obj) {
     }
 
     bytes.writeInt(obj.messages.length, 16);// messages count
-    for each (var m in obj.messages) {
+    for (var mk in obj.messages) {
+      var m = obj.messages[mk];
       bytes.writeUTF(m.targetURL);//  target
       bytes.writeUTF(m.responseURI);//  response
 
