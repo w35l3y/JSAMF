@@ -1394,7 +1394,8 @@ amf.ByteArray = Class.extend({
     } else if (d instanceof Object) {
       // writeTypedObject
       var typedObject = false;
-      for each (var o in amf.registeredClasses) {
+      for (var ek in amf.registeredClasses) {
+        var o = amf.registeredClasses[ek];
         if (d instanceof o.initFunct) {
           typedObject = true;
           this.writeInt(amf.Amf0Types.kTypedObjectType, 8);
